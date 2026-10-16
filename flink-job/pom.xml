@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.formsubmit</groupId>
+    <artifactId>flink-submission-aggregator</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>Flink Submission Hourly Aggregator</name>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <flink.version>1.18.1</flink.version>
+        <kafka.connector.version>3.1.0-1.18</kafka.connector.version>
+        <jdbc.connector.version>3.1.2-1.18</jdbc.connector.version>
+        <mysql.driver.version>8.0.33</mysql.driver.version>
+        <jackson.version>2.15.2</jackson.version>
+    </properties>
+
+    <dependencies>
+        <!-- ================================================================
+             Flink Core
+             Scope: provided — the Flink cluster ships these JARs.
+             Only our application code + connector JARs need to be in the fat jar.
+             ================================================================ -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-java</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-clients</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ================================================================
+             Kafka Connector (pre-installed in our Flink Docker image)
+             We include it here for IDE support; scope=provided at runtime.
+             ================================================================ -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-kafka</artifactId>
+            <version>${kafka.connector.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ================================================================
+             JDBC Connector — for the MySQL sink
+             ================================================================ -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-jdbc</artifactId>
+            <version>${jdbc.connector.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ================================================================
+             MySQL JDBC Driver
+             Included in the fat jar AND pre-installed in the Flink Docker image.
+             ================================================================ -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.driver.version}</version>
+        </dependency>
+
+        <!-- JSON deserialization of Kafka messages -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Fat JAR — bundles mysql-connector-j and Jackson.
+                 Connector JARs are pre-installed in /opt/flink/lib in Docker. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <artifactSet>
+                                <!-- Exclude Flink and its transitive deps (provided) -->
+                                <excludes>
+                                    <exclude>org.apache.flink:*</exclude>
+                                    <exclude>log4j:*</exclude>
+                                    <exclude>org.slf4j:*</exclude>
+                                </excludes>
+                            </artifactSet>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.formsubmit.SubmissionAggregatorJob</mainClass>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

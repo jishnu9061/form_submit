@@ -1,0 +1,399 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Submission API",
+    "description": "Complete API test collection for the Form Submission Pipeline.\nRun end-to-end with Collection Runner or newman to verify all business rules:\n- 201 on new submission\n- 200 + duplicate:true on repeated idempotency_key\n- 400 on validation errors\n- Pagination with data/links/meta\n- Hourly stats from Flink sink",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Submissions",
+      "description": "Tests for POST /api/submissions — idempotency, validation, and response shape.",
+      "item": [
+        {
+          "name": "Create submission (valid) → 201",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Generate a unique idempotency_key using a GUID and save it",
+                  "// to a collection variable so the duplicate test can reuse it.",
+                  "const key = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.collectionVariables.set('saved_idempotency_key', key);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201 Created', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has data object', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('data');",
+                  "  pm.expect(body.data).to.have.property('id');",
+                  "  pm.expect(body.data).to.have.property('form_id');",
+                  "  pm.expect(body.data).to.have.property('email');",
+                  "  pm.expect(body.data).to.have.property('created_at');",
+                  "});",
+                  "",
+                  "pm.test('Not a duplicate', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.duplicate).to.be.undefined;",
+                  "});",
+                  "",
+                  "// Save the id so the duplicate test can assert same id is returned",
+                  "const id = pm.response.json().data.id;",
+                  "pm.collectionVariables.set('saved_submission_id', id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"form_id\": \"{{form_id}}\",\n  \"idempotency_key\": \"{{saved_idempotency_key}}\",\n  \"email\": \"user@example.com\",\n  \"data\": { \"name\": \"John\", \"message\": \"Hello\" }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Creates a new submission. The pre-request script generates a unique `idempotency_key` via `{{$guid}}` and saves it to `saved_idempotency_key` collection variable. Also saves the returned `id` for the duplicate assertion."
+          }
+        },
+        {
+          "name": "Create submission (duplicate) → 200 + duplicate:true",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200 OK', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Body has duplicate:true', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.duplicate).to.equal(true);",
+                  "});",
+                  "",
+                  "pm.test('Returns same submission id as first request', () => {",
+                  "  const body = pm.response.json();",
+                  "  const originalId = pm.collectionVariables.get('saved_submission_id');",
+                  "  pm.expect(body.data.id).to.equal(originalId);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"form_id\": \"{{form_id}}\",\n  \"idempotency_key\": \"{{saved_idempotency_key}}\",\n  \"email\": \"user@example.com\",\n  \"data\": { \"name\": \"John\", \"message\": \"Hello\" }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Sends the same `idempotency_key` as the previous request (saved in `saved_idempotency_key`). Expects 200 with `duplicate:true` and the same `id`."
+          }
+        },
+        {
+          "name": "Validation: invalid email → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400 Bad Request', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "});",
+                  "",
+                  "pm.test('Error references email field', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('errors');",
+                  "  pm.expect(body.errors).to.have.property('email');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"form_id\": \"{{form_id}}\",\n  \"idempotency_key\": \"val-err-email\",\n  \"email\": \"not-an-email\",\n  \"data\": { \"name\": \"Test\" }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Sends an invalid email. Expects HTTP 400 and an `errors.email` field in the response body (overridden from Laravel's default 422)."
+          }
+        },
+        {
+          "name": "Validation: missing form_id → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error references form_id', () => {",
+                  "  pm.expect(pm.response.json().errors).to.have.property('form_id');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"val-missing-form\",\n  \"email\": \"user@example.com\",\n  \"data\": { \"name\": \"Test\" }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Omits `form_id`. Expects 400 with `errors.form_id`."
+          }
+        },
+        {
+          "name": "Validation: missing idempotency_key → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error references idempotency_key', () => {",
+                  "  pm.expect(pm.response.json().errors).to.have.property('idempotency_key');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"form_id\": \"{{form_id}}\",\n  \"email\": \"user@example.com\",\n  \"data\": { \"name\": \"Test\" }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Omits `idempotency_key`. Expects 400."
+          }
+        },
+        {
+          "name": "Validation: missing data → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error references data', () => {",
+                  "  pm.expect(pm.response.json().errors).to.have.property('data');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept",       "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"form_id\": \"{{form_id}}\",\n  \"idempotency_key\": \"val-missing-data\",\n  \"email\": \"user@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/submissions",
+              "host": ["{{base_url}}"],
+              "path": ["api", "submissions"]
+            },
+            "description": "Omits `data`. Expects 400."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Listing",
+      "description": "Tests for GET /api/forms/{form_id}/submissions — pagination.",
+      "item": [
+        {
+          "name": "List submissions (page 1) → 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('Response has data array', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('data');",
+                  "  pm.expect(body.data).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Max 10 results per page', () => {",
+                  "  pm.expect(pm.response.json().data.length).to.be.at.most(10);",
+                  "});",
+                  "",
+                  "pm.test('Response has links', () => {",
+                  "  pm.expect(pm.response.json()).to.have.property('links');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/forms/{{form_id}}/submissions?page=1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "forms", "{{form_id}}", "submissions"],
+              "query": [{ "key": "page", "value": "1" }]
+            },
+            "description": "Lists the first 10 submissions for the form. Asserts 200, data array, max 10 items, and presence of links."
+          }
+        },
+        {
+          "name": "List submissions (page 2) → 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has data array', () => {",
+                  "  pm.expect(pm.response.json().data).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/forms/{{form_id}}/submissions?page=2",
+              "host": ["{{base_url}}"],
+              "path": ["api", "forms", "{{form_id}}", "submissions"],
+              "query": [{ "key": "page", "value": "2" }]
+            },
+            "description": "Second page of submissions. Response may have an empty data array if fewer than 11 submissions exist."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Stats",
+      "description": "Tests for GET /api/forms/{form_id}/stats — Flink-aggregated hourly counts.",
+      "item": [
+        {
+          "name": "Get hourly stats → 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test('Response has data array', () => {",
+                  "  pm.expect(pm.response.json()).to.have.property('data');",
+                  "  pm.expect(pm.response.json().data).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Each item has hour_start and count', () => {",
+                  "  const items = pm.response.json().data;",
+                  "  if (items.length > 0) {",
+                  "    pm.expect(items[0]).to.have.property('hour_start');",
+                  "    pm.expect(items[0]).to.have.property('count');",
+                  "    pm.expect(items[0].count).to.be.a('number');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/forms/{{form_id}}/stats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "forms", "{{form_id}}", "stats"]
+            },
+            "description": "Returns hourly submission counts for the form as aggregated by the Flink job and stored in MySQL `form_hourly_counts`. Each item must have `hour_start` (ISO-8601) and `count` (integer)."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "saved_idempotency_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "saved_submission_id",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

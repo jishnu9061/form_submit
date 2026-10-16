@@ -1,0 +1,219 @@
+version: "3.9"
+
+# =============================================================================
+# Docker Compose — Form Submission Pipeline
+# Services: MySQL 8, Zookeeper, Kafka, Flink JobManager + TaskManager, Laravel
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # MySQL 8 — the ONLY datastore for submissions, outbox, and Flink sinks.
+  # Design: we mount a custom my.cnf and an init SQL so both databases and
+  # the dedicated user are created automatically on first boot.
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: form_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootsecret
+      MYSQL_DATABASE: app          # default database (init script adds more)
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/custom.cnf:ro
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootsecret"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Zookeeper — coordination service for Kafka broker.
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: form_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+      - zk_log:/var/lib/zookeeper/log
+
+  # ---------------------------------------------------------------------------
+  # Kafka broker — receives submission events from the Laravel outbox worker.
+  # KAFKA_ADVERTISED_LISTENERS uses "kafka:9092" (internal) so Flink (inside
+  # Docker) can connect on the same network, and "localhost:29092" for tooling
+  # running on the host machine.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: form_kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Flink JobManager — coordinates the distributed stream processing job.
+  # We use the custom flink image (built from docker/flink/Dockerfile) which
+  # adds the MySQL JDBC driver and Flink Kafka connector JARs.
+  # ---------------------------------------------------------------------------
+  flink-jobmanager:
+    build:
+      context: ./docker/flink
+      dockerfile: Dockerfile
+    container_name: form_flink_jm
+    restart: unless-stopped
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 10000
+        execution.checkpointing.mode: EXACTLY_ONCE
+        restart-strategy: fixed-delay
+        restart-strategy.fixed-delay.attempts: 10
+        restart-strategy.fixed-delay.delay: 10s
+    volumes:
+      - flink_checkpoints:/opt/flink/checkpoints
+      - ./flink-job/target:/opt/flink/jobs
+    ports:
+      - "8081:8081"   # Flink Web UI
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Flink TaskManager — executes the actual computation.
+  # Same image as JobManager; the command differentiates the role.
+  # ---------------------------------------------------------------------------
+  flink-taskmanager:
+    build:
+      context: ./docker/flink
+      dockerfile: Dockerfile
+    container_name: form_flink_tm
+    restart: unless-stopped
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 10000
+        execution.checkpointing.mode: EXACTLY_ONCE
+        restart-strategy: fixed-delay
+        restart-strategy.fixed-delay.attempts: 10
+        restart-strategy.fixed-delay.delay: 10s
+    volumes:
+      - flink_checkpoints:/opt/flink/checkpoints
+    depends_on:
+      - flink-jobmanager
+
+  # ---------------------------------------------------------------------------
+  # Laravel app running with Laravel Octane + RoadRunner.
+  # Design: Octane keeps the framework bootstrapped in memory across requests,
+  # eliminating the PHP bootstrap cost per request (~20–40 ms on a cold boot).
+  # RoadRunner is chosen over Swoole because it is a Go binary — no need for
+  # a PECL extension, simpler Docker build, and it handles HTTP/1.1 well.
+  # Workers = 8 (tune to (vCPUs * 2) in production). Each worker uses ONE
+  # persistent MySQL connection, so max MySQL connections from app = 8.
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    container_name: form_app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: "${APP_KEY}"
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: app
+      DB_USERNAME: app_user
+      DB_PASSWORD: secret
+      KAFKA_BROKERS: kafka:9092
+      OCTANE_WORKERS: 8
+      OCTANE_SERVER: roadrunner
+    volumes:
+      - ./:/var/www/html:cached
+      - /var/www/html/vendor   # anonymous volume so host vendor doesn't shadow
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "php artisan migrate --force &&
+             php artisan octane:start --server=roadrunner --host=0.0.0.0 --port=8000 --workers=${OCTANE_WORKERS:-8}"
+
+  # ---------------------------------------------------------------------------
+  # Outbox worker — polls the outbox table and publishes events to Kafka.
+  # Runs as a separate container so it can be scaled or restarted independently.
+  # ---------------------------------------------------------------------------
+  outbox-worker:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    container_name: form_outbox_worker
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: "${APP_KEY}"
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: app
+      DB_USERNAME: app_user
+      DB_PASSWORD: secret
+      KAFKA_BROKERS: kafka:9092
+    volumes:
+      - ./:/var/www/html:cached
+      - /var/www/html/vendor
+    command: php artisan outbox:publish --sleep=2
+
+volumes:
+  mysql_data:
+  kafka_data:
+  zk_data:
+  zk_log:
+  flink_checkpoints:
